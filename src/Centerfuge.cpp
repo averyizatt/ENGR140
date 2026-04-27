@@ -1,17 +1,17 @@
 #include <Arduino.h>
 
 // ============================================================
-// PLACEHOLDER PIN DEFINITIONS
-// FIXME: Replace these with your real pin numbers later
+// PIN DEFINITIONS
 // ============================================================
-const int POT_PIN = A0;      // Potentiometer input
+const int POT_PIN = A1;      // Potentiometer input
 
-const int MOTOR_IN1 = 0;     // Motor driver input 1
-const int MOTOR_IN2 = 0;     // Motor driver input 2
+const int MOTOR_IN1 = 5;     // Motor driver input 1 (D5)
+const int MOTOR_IN2 = 6;     // Motor driver input 2 (D6)
 
-const int LED_R_PIN = 0;     // RGB LED red pin
-const int LED_G_PIN = 0;     // RGB LED green pin
-const int LED_B_PIN = 0;     // RGB LED blue pin
+const int LED_R_PIN = 10;    // RGB LED red pin (D10)
+const int LED_G_PIN = 8;     // RGB LED green pin (D8)
+const int LED_B_PIN = 9;     // RGB LED blue pin (D9)
+const int STROBE_LED_PIN = 2; // Strobe LED pin (D2)
 
 // ============================================================
 // CONSTANTS
@@ -28,8 +28,8 @@ const int POT_ARM_THRESHOLD = 50;          // Must be below this at startup to a
 // ------------------------------
 // Motor speed settings
 // ------------------------------
-const int MIN_ACTIVE_PWM = 80;             // Lowest useful speed once turned on
-const int MAX_ACTIVE_PWM = 180;            // Highest allowed speed for safety
+const int MIN_ACTIVE_PWM = 120;            // Lowest useful speed once turned on
+const int MAX_ACTIVE_PWM = 255;            // Highest allowed speed (full PWM)
 const int PWM_RAMP_STEP = 2;               // How fast speed changes each loop
 
 // ------------------------------
@@ -41,6 +41,8 @@ const unsigned long FAULT_BLINK_MS = 300;           // Blink speed during fault
 const unsigned long ATTRACT_UPDATE_MS = 25;         // Attract mode LED update timing
 const unsigned long LOOP_DELAY_ACTIVE_MS = 15;      // Faster updates while running
 const unsigned long LOOP_DELAY_IDLE_MS = 60;        // Slower updates while idle
+const int STROBE_MIN_RPM = 600;                     // Estimated low running speed for strobe mapping
+const int STROBE_MAX_RPM = 900;                     // Estimated high running speed for strobe mapping
 
 // ------------------------------
 // Placeholder stall protection
@@ -49,7 +51,7 @@ const unsigned long LOOP_DELAY_IDLE_MS = 60;        // Slower updates while idle
 // or encoder. For now this is just a simple placeholder.
 // ------------------------------
 const unsigned long HIGH_PWM_STALL_TIME_MS = 8000;  // If stuck near max speed too long, fault
-const int HIGH_PWM_STALL_THRESHOLD = 170;
+const int HIGH_PWM_STALL_THRESHOLD = 250;
 
 // ============================================================
 // ENUM FOR SYSTEM STATES
@@ -84,16 +86,20 @@ unsigned long sessionStartTime = 0;
 unsigned long highPwmStartTime = 0;
 unsigned long lastFaultBlinkTime = 0;
 unsigned long lastAttractUpdateTime = 0;
+unsigned long lastStrobeToggleTime = 0;
 
 bool faultLedOn = false;
+bool strobeLedOn = false;
 
 // ============================================================
 // FUNCTION PROTOTYPES
 // ============================================================
+
 int readSmoothedPot(void);
 void updateStateMachine(void);
 void updateMotorControl(void);
 void updateLedControl(void);
+void updateStrobeControl(void);
 
 void setMotorForward(int pwmValue);
 void stopMotor(void);
@@ -111,6 +117,7 @@ bool userAdjustedKnob(void);
 // ============================================================
 // SETUP
 // ============================================================
+
 void setup()
 {
     Serial.begin(9600);
@@ -122,10 +129,12 @@ void setup()
     pinMode(LED_R_PIN, OUTPUT);
     pinMode(LED_G_PIN, OUTPUT);
     pinMode(LED_B_PIN, OUTPUT);
+    pinMode(STROBE_LED_PIN, OUTPUT);
 
     // Start safe
     stopMotor();
     setRgbColor(0, 0, 0);
+    digitalWrite(STROBE_LED_PIN, LOW);
 
     // Read first pot value
     smoothedPotValue = readSmoothedPot();
@@ -143,6 +152,7 @@ void setup()
 // ============================================================
 // MAIN LOOP
 // ============================================================
+
 void loop()
 {
     // Read the smoothed knob position every loop
@@ -156,6 +166,9 @@ void loop()
 
     // Update LED output
     updateLedControl();
+
+    // Update strobe timing LED
+    updateStrobeControl();
 
     // Debug output for testing
     Serial.print("State = ");
@@ -194,6 +207,7 @@ void loop()
 // Takes several analog readings and averages them.
 // This helps reduce noise from the potentiometer.
 // ============================================================
+
 int readSmoothedPot(void)
 {
     long total = 0;
@@ -211,6 +225,7 @@ int readSmoothedPot(void)
 // isPotNearZero()
 // Used for startup safety and idle detection.
 // ============================================================
+
 bool isPotNearZero(void)
 {
     return (smoothedPotValue <= POT_ARM_THRESHOLD);
@@ -237,6 +252,7 @@ bool userAdjustedKnob(void)
 // updateStateMachine()
 // Handles all high-level system behavior.
 // ============================================================
+
 void updateStateMachine(void)
 {
     // Keep track of real knob movement
@@ -534,6 +550,8 @@ void stopMotor(void)
 // This assumes a common cathode RGB LED.
 // If yours is common anode, invert the values later.
 // ============================================================
+
+
 void setRgbColor(int r, int g, int b)
 {
     redValue = r;
@@ -554,6 +572,8 @@ void setRgbColor(int r, int g, int b)
 // then yellow
 // then red
 // ============================================================
+
+
 void setSpeedSpectrumColor(int pwmValue)
 {
     int r = 0;
@@ -611,6 +631,8 @@ void setSpeedSpectrumColor(int pwmValue)
 // Gentle pulsing / color shift to draw attention.
 // Motor remains off.
 // ============================================================
+
+
 void runAttractMode(void)
 {
     if ((millis() - lastAttractUpdateTime) >= ATTRACT_UPDATE_MS)
@@ -644,6 +666,7 @@ void runAttractMode(void)
 // runFaultBlink()
 // Blinks red while in FAULT_STATE.
 // ============================================================
+
 void runFaultBlink(void)
 {
     if ((millis() - lastFaultBlinkTime) >= FAULT_BLINK_MS)
@@ -672,4 +695,57 @@ void enterFaultState(void)
     targetMotorPwm = 0;
     currentMotorPwm = 0;
     stopMotor();
+}
+
+// ============================================================
+// updateStrobeControl()
+// Flashes a dedicated strobe LED at a fixed cadence while RUNNING.
+// Outside RUNNING it is forced off.
+// ============================================================
+void updateStrobeControl(void)
+{
+    if (currentState == RUNNING)
+    {
+        unsigned long now = millis();
+        int estimatedRpm = map(currentMotorPwm,
+                               MIN_ACTIVE_PWM,
+                               MAX_ACTIVE_PWM,
+                               STROBE_MIN_RPM,
+                               STROBE_MAX_RPM);
+
+        if (estimatedRpm < STROBE_MIN_RPM)
+        {
+            estimatedRpm = STROBE_MIN_RPM;
+        }
+
+        if (estimatedRpm > STROBE_MAX_RPM)
+        {
+            estimatedRpm = STROBE_MAX_RPM;
+        }
+
+        // Half-period in ms. Since Hz = RPM / 60:
+        // halfPeriodMs = 1000 / (2 * Hz) = 30000 / RPM.
+        unsigned long strobeIntervalMs = 30000UL / (unsigned long)estimatedRpm;
+
+        if ((now - lastStrobeToggleTime) >= strobeIntervalMs)
+        {
+            // Keep cadence even by stepping in fixed intervals.
+            lastStrobeToggleTime += strobeIntervalMs;
+
+            // If the loop was delayed a long time, resync cleanly.
+            if ((now - lastStrobeToggleTime) >= strobeIntervalMs)
+            {
+                lastStrobeToggleTime = now;
+            }
+
+            strobeLedOn = !strobeLedOn;
+            digitalWrite(STROBE_LED_PIN, strobeLedOn ? HIGH : LOW);
+        }
+    }
+    else
+    {
+        strobeLedOn = false;
+        lastStrobeToggleTime = millis();
+        digitalWrite(STROBE_LED_PIN, LOW);
+    }
 }
